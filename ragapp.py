@@ -1,19 +1,15 @@
-import os
 import streamlit as st
 
-from langchain_google_genai import (
-    ChatGoogleGenerativeAI,
-    GoogleGenerativeAIEmbeddings
-)
+from google import genai
 
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.document_loaders import Docx2txtLoader
 from langchain_community.vectorstores import FAISS
-
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 
 # =========================================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # =========================================================
 
 st.set_page_config(
@@ -32,28 +28,27 @@ st.write(
 # GOOGLE API KEY
 # =========================================================
 
-if "GOOGLE_API_KEY" in st.secrets:
-    api_key = st.secrets["GOOGLE_API_KEY"]
-else:
+if "GOOGLE_API_KEY" not in st.secrets:
     st.error(
         "GOOGLE_API_KEY is missing. "
         "Please add it to Streamlit Secrets."
     )
     st.stop()
 
+api_key = st.secrets["GOOGLE_API_KEY"]
+
 
 # =========================================================
-# INITIALIZE GEMINI
+# GOOGLE GENAI CLIENT
 # =========================================================
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    google_api_key=api_key
+client = genai.Client(
+    api_key=api_key
 )
 
 
 # =========================================================
-# INITIALIZE EMBEDDING MODEL
+# EMBEDDING MODEL
 # =========================================================
 
 embeddings = GoogleGenerativeAIEmbeddings(
@@ -77,7 +72,7 @@ if "chunks" not in st.session_state:
 
 
 # =========================================================
-# UPLOAD WORD DOCUMENT
+# FILE UPLOAD
 # =========================================================
 
 uploaded_file = st.file_uploader(
@@ -92,13 +87,12 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
 
-    # Only process the document if it is a new upload
     if uploaded_file.name != st.session_state.uploaded_file_name:
 
         with st.spinner("Processing document..."):
 
             # -------------------------------------------------
-            # Save uploaded document temporarily
+            # Save uploaded file
             # -------------------------------------------------
 
             file_path = "uploaded_document.docx"
@@ -108,7 +102,7 @@ if uploaded_file is not None:
 
 
             # -------------------------------------------------
-            # LOAD DOCUMENT
+            # LOAD WORD DOCUMENT
             # -------------------------------------------------
 
             loader = Docx2txtLoader(file_path)
@@ -152,13 +146,12 @@ if uploaded_file is not None:
         )
 
         st.info(
-            f"Document was split into "
-            f"{len(chunks)} chunks."
+            f"Document split into {len(chunks)} chunks."
         )
 
 
 # =========================================================
-# ASK QUESTION
+# QUESTION ANSWERING
 # =========================================================
 
 if st.session_state.vector_db is not None:
@@ -169,7 +162,7 @@ if st.session_state.vector_db is not None:
 
     question = st.text_input(
         "Enter your question:",
-        placeholder="e.g. What are the company's main strengths?"
+        placeholder="e.g. What are the main strengths?"
     )
 
 
@@ -199,7 +192,7 @@ if st.session_state.vector_db is not None:
 
 
                 # =================================================
-                # STEP 2 — CREATE CONTEXT
+                # STEP 2 — BUILD CONTEXT
                 # =================================================
 
                 context = "\n\n".join(
@@ -209,19 +202,19 @@ if st.session_state.vector_db is not None:
 
 
                 # =================================================
-                # STEP 3 — CREATE PROMPT
+                # STEP 3 — BUILD PROMPT
                 # =================================================
 
                 prompt = f"""
 You are a helpful document assistant.
 
-Your job is to answer the user's question using ONLY
-the information contained in the provided document context.
+Answer the user's question using ONLY the information
+contained in the document context below.
 
 Rules:
 
-1. Do not make up information.
-2. Do not use outside knowledge.
+1. Do not use outside knowledge.
+2. Do not make up information.
 3. If the answer cannot be found in the context,
    say exactly:
 
@@ -242,16 +235,19 @@ ANSWER:
 
 
                 # =================================================
-                # STEP 4 — SEND TO GEMINI
+                # STEP 4 — GEMINI INTERACTIONS API
                 # =================================================
 
                 with st.spinner(
                     "Generating answer with Gemini..."
                 ):
 
-                    response = llm.invoke(prompt)
+                    interaction = client.interactions.create(
+                        model="gemini-3.6-flash",
+                        input=prompt
+                    )
 
-                    answer = response.content
+                    answer = interaction.output_text
 
 
                 # =================================================
@@ -264,7 +260,7 @@ ANSWER:
 
 
                 # =================================================
-                # DISPLAY RETRIEVED SOURCES
+                # DISPLAY SOURCES
                 # =================================================
 
                 st.divider()
@@ -279,9 +275,7 @@ ANSWER:
                         f"Source {i + 1}"
                     ):
 
-                        st.write(
-                            doc.page_content
-                        )
+                        st.write(doc.page_content)
 
 
             # =====================================================
@@ -290,38 +284,12 @@ ANSWER:
 
             except Exception as e:
 
-                error_message = str(e)
-
                 st.error(
                     "An error occurred while communicating "
                     "with Gemini."
                 )
 
-                st.code(error_message)
-
-                if "404" in error_message or "NotFound" in error_message:
-
-                    st.warning(
-                        "Gemini returned a 404/NotFound error. "
-                        "Please check your Google API key, "
-                        "Gemini model access, and installed "
-                        "LangChain Google GenAI package."
-                    )
-
-                elif "429" in error_message:
-
-                    st.warning(
-                        "Gemini API quota/rate limit exceeded. "
-                        "Please wait and try again."
-                    )
-
-                elif "401" in error_message or "403" in error_message:
-
-                    st.warning(
-                        "Your Google API key may be invalid "
-                        "or may not have permission to access "
-                        "the Gemini API."
-                    )
+                st.code(str(e))
 
 
 # =========================================================
@@ -334,35 +302,39 @@ with st.sidebar:
 
     st.write(
         """
-        **1. Upload Document**
+        **Word Document**
         
         ↓
         
-        **2. Extract Text**
+        **Text Extraction**
         
         ↓
         
-        **3. Split into Chunks**
+        **Chunking**
         
         ↓
         
-        **4. Create Embeddings**
+        **Gemini Embeddings**
         
         ↓
         
-        **5. Store in FAISS**
+        **FAISS Vector DB**
         
         ↓
         
-        **6. Similarity Search**
+        **Similarity Search**
         
         ↓
         
-        **7. Send Context to Gemini**
+        **Retrieved Context**
         
         ↓
         
-        **8. Generate Answer**
+        **Gemini 3.6 Flash**
+        
+        ↓
+        
+        **Answer**
         """
     )
 
@@ -371,11 +343,11 @@ with st.sidebar:
     st.write("### Models")
 
     st.write(
-        "**Generation:** Gemini 2.5 Flash"
+        "**LLM:** Gemini 3.6 Flash"
     )
 
     st.write(
-        "**Embeddings:** Gemini Embedding 001"
+        "**Embedding:** Gemini Embedding 001"
     )
 
     st.write(
