@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 
 from langchain_google_genai import (
@@ -9,56 +10,75 @@ from langchain_community.document_loaders import Docx2txtLoader
 from langchain_community.vectorstores import FAISS
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.prompts import PromptTemplate
 
 
-# ============================================================
-# 1. STREAMLIT CONFIGURATION
-# ============================================================
+# =========================================================
+# PAGE CONFIGURATION
+# =========================================================
 
 st.set_page_config(
     page_title="RAG Document Assistant",
+    page_icon="📄",
     layout="wide"
 )
 
 st.title("📄 RAG Document Assistant")
-
 st.write(
     "Upload a Word document and ask questions about its contents."
 )
 
 
-# ============================================================
-# 2. GOOGLE API KEY
-# ============================================================
+# =========================================================
+# GOOGLE API KEY
+# =========================================================
 
 if "GOOGLE_API_KEY" in st.secrets:
-
     api_key = st.secrets["GOOGLE_API_KEY"]
-
 else:
-
     st.error(
-        "Please add GOOGLE_API_KEY to Streamlit Secrets."
+        "GOOGLE_API_KEY is missing. "
+        "Please add it to Streamlit Secrets."
     )
-
     st.stop()
 
 
-# ============================================================
-# 3. INITIALIZE GEMINI LLM
-# ============================================================
+# =========================================================
+# INITIALIZE GEMINI
+# =========================================================
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
-    google_api_key=api_key,
-    temperature=0.2
+    google_api_key=api_key
 )
 
 
-# ============================================================
-# 4. UPLOAD WORD DOCUMENT
-# ============================================================
+# =========================================================
+# INITIALIZE EMBEDDING MODEL
+# =========================================================
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/gemini-embedding-001",
+    google_api_key=api_key
+)
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+if "vector_db" not in st.session_state:
+    st.session_state.vector_db = None
+
+if "uploaded_file_name" not in st.session_state:
+    st.session_state.uploaded_file_name = None
+
+if "chunks" not in st.session_state:
+    st.session_state.chunks = None
+
+
+# =========================================================
+# UPLOAD WORD DOCUMENT
+# =========================================================
 
 uploaded_file = st.file_uploader(
     "Upload your Word document",
@@ -66,111 +86,121 @@ uploaded_file = st.file_uploader(
 )
 
 
-# ============================================================
-# 5. PROCESS DOCUMENT
-# ============================================================
+# =========================================================
+# PROCESS DOCUMENT
+# =========================================================
 
 if uploaded_file is not None:
 
-    # Save uploaded file temporarily
-    with open("uploaded_document.docx", "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    # Only process the document if it is a new upload
+    if uploaded_file.name != st.session_state.uploaded_file_name:
+
+        with st.spinner("Processing document..."):
+
+            # -------------------------------------------------
+            # Save uploaded document temporarily
+            # -------------------------------------------------
+
+            file_path = "uploaded_document.docx"
+
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
 
-    st.success(
-        f"Uploaded: {uploaded_file.name}"
-    )
+            # -------------------------------------------------
+            # LOAD DOCUMENT
+            # -------------------------------------------------
+
+            loader = Docx2txtLoader(file_path)
+
+            documents = loader.load()
 
 
-    # ========================================================
-    # 6. LOAD DOCUMENT
-    # ========================================================
+            # -------------------------------------------------
+            # SPLIT DOCUMENT INTO CHUNKS
+            # -------------------------------------------------
 
-    loader = Docx2txtLoader(
-        "uploaded_document.docx"
-    )
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=100
+            )
 
-    documents = loader.load()
-
-
-    # ========================================================
-    # 7. SPLIT DOCUMENT INTO CHUNKS
-    # ========================================================
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100
-    )
-
-    chunks = text_splitter.split_documents(
-        documents
-    )
+            chunks = text_splitter.split_documents(documents)
 
 
-    st.info(
-        f"Document split into {len(chunks)} chunks."
-    )
+            # -------------------------------------------------
+            # CREATE VECTOR DATABASE
+            # -------------------------------------------------
+
+            vector_db = FAISS.from_documents(
+                chunks,
+                embeddings
+            )
 
 
-    # ========================================================
-    # 8. CREATE EMBEDDINGS
-    # ========================================================
+            # -------------------------------------------------
+            # STORE IN SESSION
+            # -------------------------------------------------
 
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=api_key
-    )
+            st.session_state.vector_db = vector_db
+            st.session_state.uploaded_file_name = uploaded_file.name
+            st.session_state.chunks = chunks
 
 
-    # ========================================================
-    # 9. CREATE VECTOR DATABASE
-    # ========================================================
+        st.success(
+            f"Successfully processed: {uploaded_file.name}"
+        )
 
-    with st.spinner(
-        "Creating vector database..."
-    ):
-
-        vector_db = FAISS.from_documents(
-            chunks,
-            embeddings
+        st.info(
+            f"Document was split into "
+            f"{len(chunks)} chunks."
         )
 
 
-    st.success(
-        "Document successfully indexed!"
-    )
+# =========================================================
+# ASK QUESTION
+# =========================================================
 
+if st.session_state.vector_db is not None:
 
-    # ========================================================
-    # 10. ASK QUESTION
-    # ========================================================
+    st.divider()
+
+    st.subheader("Ask a question")
 
     question = st.text_input(
-        "Ask a question about the document:"
+        "Enter your question:",
+        placeholder="e.g. What are the company's main strengths?"
     )
 
 
-    if st.button("Ask"):
+    if st.button("🔍 Ask", type="primary"):
 
-        if question:
+        if not question.strip():
 
-            with st.spinner(
-                "Searching document and generating answer..."
-            ):
+            st.warning("Please enter a question.")
 
-                # --------------------------------------------
-                # Retrieve relevant chunks
-                # --------------------------------------------
+        else:
 
-                retrieved_docs = vector_db.similarity_search(
-                    question,
-                    k=3
-                )
+            try:
+
+                # =================================================
+                # STEP 1 — VECTOR SEARCH
+                # =================================================
+
+                with st.spinner("Searching the document..."):
+
+                    retrieved_docs = (
+                        st.session_state.vector_db
+                        .similarity_search(
+                            question,
+                            k=3
+                        )
+                    )
 
 
-                # --------------------------------------------
-                # Combine retrieved chunks
-                # --------------------------------------------
+                # =================================================
+                # STEP 2 — CREATE CONTEXT
+                # =================================================
 
                 context = "\n\n".join(
                     doc.page_content
@@ -178,75 +208,176 @@ if uploaded_file is not None:
                 )
 
 
-                # --------------------------------------------
-                # Prompt
-                # --------------------------------------------
+                # =================================================
+                # STEP 3 — CREATE PROMPT
+                # =================================================
 
                 prompt = f"""
 You are a helpful document assistant.
 
-Answer the user's question using ONLY the
-information provided in the context.
+Your job is to answer the user's question using ONLY
+the information contained in the provided document context.
 
-If the answer cannot be found in the context,
-say:
+Rules:
+
+1. Do not make up information.
+2. Do not use outside knowledge.
+3. If the answer cannot be found in the context,
+   say exactly:
 
 "I could not find the answer in the document."
 
-Do not make up information.
+4. Give a clear and concise answer.
 
-CONTEXT:
+DOCUMENT CONTEXT:
+----------------
 {context}
+----------------
 
-QUESTION:
+USER QUESTION:
 {question}
 
 ANSWER:
 """
 
 
-                # --------------------------------------------
-                # Send to Gemini
-                # --------------------------------------------
+                # =================================================
+                # STEP 4 — SEND TO GEMINI
+                # =================================================
 
-                response = llm.invoke(
-                    prompt
-                )
-
-                answer = response.content
-
-
-            # =================================================
-            # 11. DISPLAY ANSWER
-            # =================================================
-
-            st.subheader("Answer")
-
-            st.markdown(answer)
-
-
-            # =================================================
-            # 12. DISPLAY RETRIEVED SOURCES
-            # =================================================
-
-            st.subheader(
-                "🔎 Retrieved Document Sections"
-            )
-
-            for i, doc in enumerate(
-                retrieved_docs
-            ):
-
-                with st.expander(
-                    f"Source {i + 1}"
+                with st.spinner(
+                    "Generating answer with Gemini..."
                 ):
 
-                    st.write(
-                        doc.page_content
+                    response = llm.invoke(prompt)
+
+                    answer = response.content
+
+
+                # =================================================
+                # DISPLAY ANSWER
+                # =================================================
+
+                st.subheader("💡 Answer")
+
+                st.markdown(answer)
+
+
+                # =================================================
+                # DISPLAY RETRIEVED SOURCES
+                # =================================================
+
+                st.divider()
+
+                st.subheader(
+                    "🔎 Retrieved Document Sections"
+                )
+
+                for i, doc in enumerate(retrieved_docs):
+
+                    with st.expander(
+                        f"Source {i + 1}"
+                    ):
+
+                        st.write(
+                            doc.page_content
+                        )
+
+
+            # =====================================================
+            # ERROR HANDLING
+            # =====================================================
+
+            except Exception as e:
+
+                error_message = str(e)
+
+                st.error(
+                    "An error occurred while communicating "
+                    "with Gemini."
+                )
+
+                st.code(error_message)
+
+                if "404" in error_message or "NotFound" in error_message:
+
+                    st.warning(
+                        "Gemini returned a 404/NotFound error. "
+                        "Please check your Google API key, "
+                        "Gemini model access, and installed "
+                        "LangChain Google GenAI package."
                     )
 
-        else:
+                elif "429" in error_message:
 
-            st.warning(
-                "Please enter a question."
-            )
+                    st.warning(
+                        "Gemini API quota/rate limit exceeded. "
+                        "Please wait and try again."
+                    )
+
+                elif "401" in error_message or "403" in error_message:
+
+                    st.warning(
+                        "Your Google API key may be invalid "
+                        "or may not have permission to access "
+                        "the Gemini API."
+                    )
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+
+with st.sidebar:
+
+    st.header("📊 RAG Pipeline")
+
+    st.write(
+        """
+        **1. Upload Document**
+        
+        ↓
+        
+        **2. Extract Text**
+        
+        ↓
+        
+        **3. Split into Chunks**
+        
+        ↓
+        
+        **4. Create Embeddings**
+        
+        ↓
+        
+        **5. Store in FAISS**
+        
+        ↓
+        
+        **6. Similarity Search**
+        
+        ↓
+        
+        **7. Send Context to Gemini**
+        
+        ↓
+        
+        **8. Generate Answer**
+        """
+    )
+
+    st.divider()
+
+    st.write("### Models")
+
+    st.write(
+        "**Generation:** Gemini 2.5 Flash"
+    )
+
+    st.write(
+        "**Embeddings:** Gemini Embedding 001"
+    )
+
+    st.write(
+        "**Vector DB:** FAISS"
+    )
